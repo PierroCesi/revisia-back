@@ -3,3 +3,9 @@ djangorestframework==3.16.1
 djangorestframework-simplejwt==5.3.0
 django-cors-headers==4.8.0
 python-dotenv==1.0.0
+dj-database-url==2.1.0
+openai
+requests
+setuptools
+psycopg[binary]
+gunicorn
