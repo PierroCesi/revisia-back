@@ -20,34 +20,39 @@ def get_client_ip(request):
 
 def get_or_create_guest_session(request, session_id=None):
     """
-    Récupère ou crée une session invité
+    Récupère ou crée une session invité permanente (une seule par IP)
     """
     ip_address = get_client_ip(request)
     
-    # Si un session_id est fourni, essayer de le récupérer
+    # Essayer de récupérer une session existante pour cette IP
+    try:
+        session = GuestSession.objects.get(ip_address=ip_address)
+        logger.info(f"Session invité existante trouvée pour IP {ip_address}: {session.session_id}")
+        return session
+    except GuestSession.DoesNotExist:
+        # Aucune session existante pour cette IP
+        pass
+    
+    # Si un session_id est fourni, essayer de le récupérer (pour compatibilité)
     if session_id:
         try:
-            session = GuestSession.objects.get(session_id=session_id, ip_address=ip_address)
-            # Vérifier si la session n'a pas expiré
-            if session.is_expired():
-                logger.info(f"Session invité expirée: {session_id}")
-                session.delete()
-                return create_new_guest_session(ip_address)
+            session = GuestSession.objects.get(session_id=session_id)
+            logger.info(f"Session invité trouvée par session_id: {session_id}")
             return session
         except GuestSession.DoesNotExist:
             logger.warning(f"Session invité introuvable: {session_id}")
     
-    # Créer une nouvelle session
+    # Créer une nouvelle session permanente
     return create_new_guest_session(ip_address)
 
 def create_new_guest_session(ip_address):
-    """Crée une nouvelle session invité"""
+    """Crée une nouvelle session invité permanente"""
     session_id = str(uuid.uuid4())
     session = GuestSession.objects.create(
         ip_address=ip_address,
         session_id=session_id
     )
-    logger.info(f"Nouvelle session invité créée: {session_id} pour IP {ip_address}")
+    logger.info(f"Nouvelle session invité permanente créée: {session_id} pour IP {ip_address}")
     return session
 
 def check_guest_limits(request, session_id=None):
@@ -94,47 +99,23 @@ def increment_guest_usage(session):
         return False
 
 def cleanup_expired_guest_sessions():
-    """Nettoie les sessions invités expirées et leurs documents"""
-    try:
-        # Récupérer les sessions expirées
-        expired_sessions = GuestSession.objects.filter(
-            created_at__lt=timezone.now() - timezone.timedelta(hours=24)
-        )
-        
-        count = 0
-        for session in expired_sessions:
-            # Supprimer les documents associés (user=None)
-            documents = Document.objects.filter(user=None)
-            document_count = documents.count()
-            documents.delete()
-            
-            # Supprimer la session
-            session.delete()
-            count += 1
-            
-            logger.info(f"Session expirée nettoyée: {session.session_id} ({document_count} documents supprimés)")
-        
-        logger.info(f"Nettoyage terminé: {count} sessions expirées supprimées")
-        return count
-        
-    except Exception as e:
-        logger.error(f"Erreur lors du nettoyage des sessions: {e}")
-        return 0
+    """Nettoie les sessions invités expirées et leurs documents (désactivé - sessions permanentes)"""
+    # Sessions permanentes - pas de nettoyage automatique
+    logger.info("Nettoyage des sessions invités désactivé - sessions permanentes")
+    return 0
 
 def get_guest_stats():
     """Retourne les statistiques des invités"""
     try:
         total_sessions = GuestSession.objects.count()
-        active_sessions = GuestSession.objects.filter(
-            created_at__gte=timezone.now() - timezone.timedelta(hours=24)
-        ).count()
         blocked_sessions = GuestSession.objects.filter(is_blocked=True).count()
+        active_sessions = total_sessions - blocked_sessions
         
         return {
             'total_sessions': total_sessions,
             'active_sessions': active_sessions,
             'blocked_sessions': blocked_sessions,
-            'expired_sessions': total_sessions - active_sessions
+            'expired_sessions': 0  # Sessions permanentes
         }
     except Exception as e:
         logger.error(f"Erreur lors du calcul des statistiques: {e}")

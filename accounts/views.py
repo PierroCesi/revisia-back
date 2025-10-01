@@ -125,7 +125,7 @@ def user_role_info(request):
             'can_save_results': True
         },
         'premium': {
-            'max_questions': None,  # None = illimité
+            'max_questions': 50,  # 50 questions max par quiz
             'max_quizzes_per_day': None,  # None = illimité
             'max_attempts_per_day': None,  # None = illimité
             'can_save_results': True
@@ -208,7 +208,12 @@ def upload_document(request):
     elif user_role == 'free' and question_count > 6:
         return Response({
             'error': 'Limite atteinte. Les comptes gratuits sont limités à 6 questions maximum.',
-            'details': 'Passez à Premium pour créer des quiz avec un nombre illimité de questions.'
+            'details': 'Passez à Premium pour créer des quiz avec jusqu\'à 50 questions.'
+        }, status=status.HTTP_403_FORBIDDEN)
+    elif user_role == 'premium' and question_count > 50:
+        return Response({
+            'error': 'Limite atteinte. Les comptes premium sont limités à 50 questions maximum par quiz.',
+            'details': 'Cette limite permet d\'assurer la qualité et la performance des quiz.'
         }, status=status.HTTP_403_FORBIDDEN)
     
     # Vérifier les limites de quiz par jour pour les utilisateurs connectés

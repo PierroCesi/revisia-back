@@ -10,7 +10,7 @@ Les fichiers CSS de l'admin Django n'apparaissaient pas en production avec Nixpa
 1. **WhiteNoise** : Ajouté pour servir les fichiers statiques en production
 2. **Configuration STATIC** : Configuré `STATIC_ROOT` et `STATIC_URL`
 3. **Procfile** : Ajouté `collectstatic` dans la phase de release
-4. **Nixpacks** : Configuration optimisée pour le déploiement
+4. **Détection automatique** : Nixpacks détecte automatiquement Python et Django
 
 ### Variables d'environnement requises
 
@@ -43,3 +43,17 @@ Après déploiement, vérifier que :
 - L'admin Django a ses styles CSS
 - Les fichiers statiques sont servis correctement
 - Les URLs `/static/` fonctionnent
+
+### Résolution des erreurs de déploiement
+
+#### Erreur "undefined variable 'pip'"
+- **Cause** : Configuration Nixpacks incorrecte
+- **Solution** : Supprimer `nixpacks.toml` et laisser la détection automatique
+
+#### Erreur "No module named 'whitenoise'"
+- **Cause** : WhiteNoise non installé localement
+- **Solution** : `pip install whitenoise` dans l'environnement virtuel
+
+#### Erreur WSGI
+- **Cause** : Middleware WhiteNoise configuré mais package non installé
+- **Solution** : Installer WhiteNoise avant de configurer le middleware

@@ -231,8 +231,8 @@ class LessonAttempt(models.Model):
         return f"{self.lesson.title} - Tentative {self.attempt_number}: {self.score}%"
 
 class GuestSession(models.Model):
-    """Sessions temporaires pour les utilisateurs invités"""
-    ip_address = models.GenericIPAddressField(help_text="Adresse IP de l'invité")
+    """Sessions permanentes pour les utilisateurs invités - une seule par IP"""
+    ip_address = models.GenericIPAddressField(unique=True, help_text="Adresse IP de l'invité (unique)")
     session_id = models.CharField(max_length=100, unique=True, help_text="ID de session unique")
     documents_created = models.PositiveIntegerField(default=0, help_text="Nombre de documents créés")
     last_activity = models.DateTimeField(auto_now=True, help_text="Dernière activité")
@@ -246,7 +246,7 @@ class GuestSession(models.Model):
     class Meta:
         ordering = ['-last_activity']
         indexes = [
-            models.Index(fields=['ip_address', 'created_at']),
+            models.Index(fields=['ip_address']),
             models.Index(fields=['session_id']),
             models.Index(fields=['transferred_to_user']),
         ]
@@ -263,10 +263,8 @@ class GuestSession(models.Model):
         self.save()
     
     def is_expired(self, hours=24):
-        """Vérifie si la session a expiré (24h par défaut)"""
-        from django.utils import timezone
-        from datetime import timedelta
-        return timezone.now() - self.created_at > timedelta(hours=hours)
+        """Vérifie si la session a expiré (désactivé - sessions permanentes)"""
+        return False  # Sessions permanentes - jamais expirées
     
     def transfer_to_user(self, user):
         """Transfère la session et ses données vers un utilisateur"""
