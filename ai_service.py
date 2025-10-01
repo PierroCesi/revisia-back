@@ -13,7 +13,7 @@ class OpenAIService:
     def __init__(self):
         self.client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
     
-    def generate_questions_from_document(self, file_path, document_title, question_count=5, difficulty='medium', education_level=''):
+    def generate_questions_from_document(self, file_path, document_title, question_count=5, difficulty='medium', education_level='', instructions=''):
         """
         Génère des questions QCM à partir d'un fichier directement transmis à l'IA
         """
@@ -23,6 +23,14 @@ class OpenAIService:
             logger.info(f"🚀 Début de génération IA pour le document: {document_title}")
             logger.info(f"📁 Chemin du fichier: {file_path}")
             logger.info(f"📊 Paramètres: {question_count} questions, difficulté {difficulty}, niveau {education_level}")
+            logger.info(f"📝 Instructions personnalisées: {instructions[:100] if instructions else 'Aucune'}...")
+            
+            # Vérifier la clé API
+            if not settings.OPENAI_API_KEY:
+                logger.error("❌ Clé API OpenAI manquante dans les paramètres")
+                raise Exception("Configuration OpenAI manquante")
+            
+            logger.info(f"🔑 Clé API OpenAI configurée: {settings.OPENAI_API_KEY[:10]}...")
             
             # Construire le contexte éducatif détaillé
             education_context = self._build_education_context(education_level)
@@ -58,13 +66,24 @@ class OpenAIService:
             mime_type = mime_types.get(file_extension, 'application/octet-stream')
             logger.info(f"🏷️ Extension: {file_extension}, Type MIME: {mime_type}")
             
+            # Construire les instructions personnalisées
+            custom_instructions = ""
+            if instructions and instructions.strip():
+                custom_instructions = f"""
+
+Instructions personnalisées de l'utilisateur:
+{instructions.strip()}
+
+IMPORTANT: Respecte ces instructions personnalisées lors de la génération des questions. Elles ont la priorité sur les instructions générales ci-dessous.
+"""
+
             # Prompt pour générer des questions QCM
             prompt = f"""
 Tu es un expert en pédagogie et en didactique. Génère {question_count} questions à choix multiples (QCM) de haute qualité basées sur le document suivant.
 
 Titre du document: {document_title}
 
-{education_context}
+{education_context}{custom_instructions}
 
 Instructions détaillées:
 - Génère exactement {question_count} questions QCM
@@ -181,16 +200,40 @@ Réponds UNIQUEMENT avec le JSON, sans texte supplémentaire.
             logger.error(f"Contenu reçu: {content}")
             raise Exception(f"Erreur de parsing JSON de la réponse IA: {e}")
             
+        except openai.AuthenticationError as e:
+            logger.error(f"❌ Erreur d'authentification OpenAI: {e}")
+            raise Exception("Erreur d'authentification avec l'API OpenAI. Vérifiez la configuration de la clé API.")
+            
+        except openai.RateLimitError as e:
+            logger.error(f"⏰ Limite de taux OpenAI atteinte: {e}")
+            raise Exception("Limite de requêtes atteinte. Veuillez réessayer dans quelques minutes.")
+            
+        except openai.APIError as e:
+            logger.error(f"🔌 Erreur API OpenAI: {e}")
+            raise Exception("Erreur temporaire de l'API OpenAI. Veuillez réessayer.")
+            
         except Exception as e:
-            logger.error(f"Erreur OpenAI: {e}")
+            logger.error(f"❌ Erreur inattendue lors de la génération IA: {e}")
+            logger.error(f"📋 Type d'erreur: {type(e).__name__}")
+            logger.error(f"📋 Détails: {str(e)}")
+            
             # Nettoyer le fichier uploadé en cas d'erreur
             try:
                 if 'uploaded_file' in locals():
                     self.client.files.delete(uploaded_file.id)
                     logger.info(f"🗑️ Fichier temporaire supprimé après erreur: {uploaded_file.id}")
-            except:
-                pass
-            raise Exception(f"Erreur lors de la génération des questions par l'IA: {e}")
+            except Exception as cleanup_error:
+                logger.error(f"❌ Erreur lors du nettoyage: {cleanup_error}")
+                
+            # Messages d'erreur plus spécifiques
+            if "API key" in str(e).lower():
+                raise Exception("Clé API OpenAI manquante ou invalide. Contactez l'administrateur.")
+            elif "quota" in str(e).lower() or "limit" in str(e).lower():
+                raise Exception("Quota OpenAI dépassé. Veuillez réessayer plus tard.")
+            elif "timeout" in str(e).lower():
+                raise Exception("Délai d'attente dépassé. Le document est peut-être trop volumineux.")
+            else:
+                raise Exception(f"Erreur lors de la génération des questions: {str(e)}")
     
     def _build_education_context(self, education_level):
         """Construit un contexte éducatif détaillé basé sur le niveau d'éducation"""

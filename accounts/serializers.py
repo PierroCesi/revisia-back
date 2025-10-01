@@ -42,7 +42,7 @@ class UserLoginSerializer(serializers.Serializer):
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ('id', 'email', 'username', 'first_name', 'last_name', 'created_at')
+        fields = ('id', 'email', 'username', 'first_name', 'last_name', 'education_level', 'created_at')
 
 class DocumentSerializer(serializers.ModelSerializer):
     class Meta:
