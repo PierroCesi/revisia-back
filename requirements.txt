@@ -9,3 +9,4 @@ requests
 setuptools
 psycopg[binary]
 gunicorn
+whitenoise
