@@ -182,8 +182,8 @@ def upload_document(request):
     if user_role == 'guest':
         from .guest_utils import check_guest_limits, rate_limit_check
         
-        # Vérifier le rate limiting par IP (5 requêtes par heure)
-        is_rate_allowed, remaining_requests = rate_limit_check(request, max_requests=5, window_minutes=60)
+        # Vérifier le rate limiting par IP (1 requête par session/IP)
+        is_rate_allowed, remaining_requests = rate_limit_check(request, max_requests=1, window_minutes=60)
         if not is_rate_allowed:
             return Response({
                 'error': 'Trop de requêtes',
