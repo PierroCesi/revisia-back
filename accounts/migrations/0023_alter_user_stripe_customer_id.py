@@ -13,6 +13,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='user',
             name='stripe_customer_id',
-            field=models.CharField(blank=True, help_text='ID du customer Stripe', max_length=255, null=True, unique=True),
+            field=models.CharField(blank=True, help_text='ID du customer Stripe', max_length=255, null=True),
         ),
     ]
