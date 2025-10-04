@@ -10,11 +10,19 @@ class User(AbstractUser):
     
     # Champs pour le système de rôles
     is_premium = models.BooleanField(default=False, help_text="Utilisateur premium")
-    premium_expires_at = models.DateTimeField(null=True, blank=True, help_text="Expiration du statut premium")
     quiz_count_today = models.IntegerField(default=0, help_text="Nombre de quiz créés aujourd'hui")
     last_quiz_date = models.DateField(null=True, blank=True, help_text="Date du dernier quiz créé")
     attempts_count_today = models.IntegerField(default=0, help_text="Nombre de tentatives de quiz aujourd'hui")
     last_attempt_date = models.DateField(null=True, blank=True, help_text="Date de la dernière tentative")
+    
+    # Champs Stripe Subscriptions
+    stripe_customer_id = models.CharField(max_length=255, blank=True, unique=True, null=True, help_text="ID du customer Stripe")
+    stripe_subscription_id = models.CharField(max_length=255, blank=True, help_text="ID de l'abonnement Stripe")
+    subscription_status = models.CharField(max_length=50, default='inactive', help_text="Statut de l'abonnement Stripe")
+    current_period_end = models.DateTimeField(null=True, blank=True, help_text="Fin de la période courante de l'abonnement")
+    subscription_interval = models.CharField(max_length=20, blank=True, help_text="Intervalle de l'abonnement (monthly/yearly)")
+    cancel_at_period_end = models.BooleanField(default=False, help_text="Abonnement programmé pour être annulé à la fin de la période")
+    canceled_at = models.DateTimeField(null=True, blank=True, help_text="Date d'annulation de l'abonnement")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -24,12 +32,73 @@ class User(AbstractUser):
     
     def get_user_role(self):
         """Retourne le rôle de l'utilisateur"""
-        if self.is_premium:
+        if self.is_premium and self.is_subscription_active():
             return 'premium'
         elif self.is_authenticated:
             return 'free'
         else:
             return 'guest'
+    
+    def is_subscription_active(self):
+        """Vérifie si l'abonnement Stripe est actif"""
+        if not self.is_premium or not self.stripe_subscription_id:
+            return False
+        
+        # Vérifier le statut de l'abonnement Stripe
+        active_statuses = ['active', 'trialing', 'past_due']
+        return self.subscription_status in active_statuses
+    
+    def get_subscription_status(self):
+        """Retourne le statut de l'abonnement"""
+        if not self.is_premium:
+            return 'inactive'
+        
+        if not self.stripe_subscription_id:
+            # Fallback pour les anciens utilisateurs sans abonnement Stripe
+            return 'permanent' if self.is_premium else 'inactive'
+        
+        # Utiliser le statut Stripe
+        return self.subscription_status
+    
+    def get_days_remaining(self):
+        """Retourne le nombre de jours restants avant expiration"""
+        if not self.is_premium:
+            return None
+        
+        if self.current_period_end:
+            # Utiliser la date de fin de période Stripe
+            from django.utils import timezone
+            now = timezone.now()
+            if now >= self.current_period_end:
+                return 0
+            delta = self.current_period_end - now
+            return delta.days
+        
+        return None
+    
+    def get_subscription_info(self):
+        """Retourne les informations complètes de l'abonnement"""
+        return {
+            'is_premium': self.is_premium,
+            'subscription_status': self.get_subscription_status(),
+            'is_subscription_active': self.is_subscription_active(),
+            'stripe_customer_id': self.stripe_customer_id,
+            'stripe_subscription_id': self.stripe_subscription_id,
+            'current_period_end': self.current_period_end.isoformat() if self.current_period_end else None,
+            'days_remaining': self.get_days_remaining(),
+            'subscription_interval': self.subscription_interval,
+            'cancel_at_period_end': self.cancel_at_period_end,
+            'canceled_at': self.canceled_at.isoformat() if self.canceled_at else None,
+            'user_role': self.get_user_role(),
+        }
+    
+    def extend_subscription(self, days=30):
+        """Prolonge l'abonnement de X jours (pour migration uniquement)"""
+        from django.utils import timezone
+        
+        # Cette méthode est dépréciée, utiliser Stripe Subscriptions
+        self.is_premium = True
+        self.save()
     
     def can_create_quiz_today(self):
         """Vérifie si l'utilisateur peut créer un quiz aujourd'hui"""
@@ -288,3 +357,32 @@ class GuestSession(models.Model):
     
     def __str__(self):
         return f"Guest Session {self.session_id[:8]}... - {self.ip_address} ({self.documents_created} docs)"
+
+class StripePayment(models.Model):
+    """Modèle pour tracker les paiements Stripe"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='stripe_payments')
+    payment_intent_id = models.CharField(max_length=255, unique=True)
+    amount = models.IntegerField(help_text="Montant en centimes")
+    currency = models.CharField(max_length=3, default='eur')
+    status = models.CharField(max_length=50)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = "Paiement Stripe"
+        verbose_name_plural = "Paiements Stripe"
+    
+    def __str__(self):
+        return f"Paiement {self.payment_intent_id} - {self.user.email} - {self.amount/100:.2f}€"
+    
+    @property
+    def amount_euros(self):
+        """Retourne le montant en euros"""
+        return self.amount / 100
+    
+    @property
+    def is_successful(self):
+        """Vérifie si le paiement a réussi"""
+        return self.status == 'succeeded'

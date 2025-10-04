@@ -31,7 +31,7 @@ SECRET_KEY = 'django-insecure-nt9#@f&^u&(eju^ktj8oq$@u#m==#3*kj)id&$4ks3vboykkg6
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,api.revisia-app.fr').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,172.20.10.2,api.revisia-app.fr').split(',')
 
 
 # Application definition
@@ -172,3 +172,12 @@ CORS_ALLOW_CREDENTIALS = True
 
 # OpenAI API Key
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', 'your-openai-api-key-here')
+
+# Stripe Configuration
+STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY')
+STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
+
+# Stripe Price IDs pour les abonnements
+STRIPE_PRICE_MONTHLY = os.environ.get('STRIPE_PRICE_MONTHLY', 'price_1SEWOrDrRzoIRADbmlBpSSRg')
+STRIPE_PRICE_YEARLY = os.environ.get('STRIPE_PRICE_YEARLY', 'price_1SEWPXDrRzoIRADbbsqZ3XkH')

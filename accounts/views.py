@@ -7,17 +7,24 @@ from django.contrib.auth import authenticate
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from django.utils import timezone
+from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse
 import os
 import uuid
 import logging
+import stripe
+import json
+from datetime import datetime
+# UserSerializer removed - using manual serialization
 
 logger = logging.getLogger(__name__)
 from .serializers import (
-    UserRegistrationSerializer, UserLoginSerializer, UserSerializer, 
+    UserRegistrationSerializer, UserLoginSerializer, 
     DocumentSerializer, QuestionSerializer, LessonSerializer, 
     UserAnswerSerializer, LessonStatsSerializer, LessonAttemptSerializer
 )
-from .models import User, Document, Question, Answer, Lesson, UserAnswer, LessonAttempt, GuestSession
+from .models import User, Document, Question, Answer, Lesson, UserAnswer, LessonAttempt, GuestSession, StripePayment
 from ai_service import OpenAIService
 
 @api_view(['POST'])
@@ -28,7 +35,14 @@ def register(request):
         user = serializer.save()
         refresh = RefreshToken.for_user(user)
         return Response({
-            'user': UserSerializer(user).data,
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'is_premium': user.is_premium,
+            },
             'tokens': {
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
@@ -44,7 +58,14 @@ def login(request):
         user = serializer.validated_data['user']
         refresh = RefreshToken.for_user(user)
         return Response({
-            'user': UserSerializer(user).data,
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'is_premium': user.is_premium,
+            },
             'tokens': {
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
@@ -55,8 +76,189 @@ def login(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def profile(request):
-    serializer = UserSerializer(request.user)
-    return Response(serializer.data)
+    user = request.user
+    return Response({
+        'id': user.id,
+        'email': user.email,
+        'username': user.username,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'is_premium': user.is_premium,
+        'education_level': user.education_level,
+        'date_joined': user.date_joined,
+    })
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_subscription_info(request):
+    """Récupère les informations d'abonnement de l'utilisateur"""
+    user = request.user
+    return Response(user.get_subscription_info())
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_subscription(request):
+    """Crée un abonnement Stripe récurrent"""
+    stripe.api_key = settings.STRIPE_SECRET_KEY
+    user = request.user
+    price_id = request.data.get('price_id')
+    
+    if not price_id:
+        return Response({
+            'error': 'Price ID requis'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    logger.info(f"🔄 Création d'abonnement pour utilisateur: {user.id}, price_id: {price_id}")
+    
+    # Protection contre les appels multiples simultanés
+    import threading
+    import time
+    
+    # Créer un verrou simple basé sur l'utilisateur
+    if not hasattr(create_subscription, '_locks'):
+        create_subscription._locks = {}
+    
+    lock_key = f"subscription_creation_{user.id}"
+    if lock_key not in create_subscription._locks:
+        create_subscription._locks[lock_key] = threading.Lock()
+    
+    # Vérifier si une création est déjà en cours
+    if not create_subscription._locks[lock_key].acquire(blocking=False):
+        logger.warning(f"⚠️ Création d'abonnement déjà en cours pour utilisateur {user.id}")
+        return Response({
+            'error': 'Une création d\'abonnement est déjà en cours',
+        }, status=status.HTTP_409_CONFLICT)
+    
+    try:
+            # Vérifier si l'utilisateur a déjà un abonnement en cours
+            if user.stripe_subscription_id:
+                try:
+                    existing_subscription = stripe.Subscription.retrieve(user.stripe_subscription_id)
+                    if existing_subscription.status in ['active', 'trialing', 'incomplete']:
+                        logger.warning(f"⚠️ Utilisateur {user.id} a déjà un abonnement actif: {existing_subscription.id}")
+                        return Response({
+                            'error': 'Un abonnement est déjà en cours',
+                            'subscription_id': existing_subscription.id,
+                            'status': existing_subscription.status,
+                        }, status=status.HTTP_409_CONFLICT)
+                except stripe.error.StripeError:
+                    # Si l'abonnement n'existe plus côté Stripe, on continue
+                    pass
+            
+            # Créer ou récupérer le customer Stripe avec protection renforcée
+            if not user.stripe_customer_id:
+                # Vérifier s'il existe déjà un customer avec cet email
+                existing_customers = stripe.Customer.list(email=user.email, limit=1)
+                if existing_customers.data:
+                    customer = existing_customers.data[0]
+                    user.stripe_customer_id = customer.id
+                    user.save()
+                    logger.info(f"✅ Customer Stripe existant trouvé: {customer.id}")
+                else:
+                    # Double vérification avant création (protection race condition)
+                    existing_customers = stripe.Customer.list(email=user.email, limit=1)
+                    if existing_customers.data:
+                        customer = existing_customers.data[0]
+                        user.stripe_customer_id = customer.id
+                        user.save()
+                        logger.info(f"✅ Customer Stripe existant trouvé (2ème vérification): {customer.id}")
+                    else:
+                        customer = stripe.Customer.create(
+                            email=user.email,
+                            name=f"{user.first_name} {user.last_name}",
+                            metadata={
+                                'user_id': user.id,
+                                'user_email': user.email,
+                            }
+                        )
+                        user.stripe_customer_id = customer.id
+                        user.save()
+                        logger.info(f"✅ Customer Stripe créé: {customer.id}")
+            else:
+                customer = stripe.Customer.retrieve(user.stripe_customer_id)
+                logger.info(f"✅ Customer Stripe existant: {customer.id}")
+            
+            # Créer l'abonnement avec protection
+            subscription = stripe.Subscription.create(
+                customer=customer.id,
+                items=[{'price': price_id}],
+                payment_behavior='default_incomplete',
+                payment_settings={'save_default_payment_method': 'on_subscription'},
+                expand=['latest_invoice.payment_intent'],
+                metadata={
+                    'user_id': user.id,
+                    'user_email': user.email,
+                }
+            )
+            
+            # Sauvegarder immédiatement l'ID de l'abonnement pour éviter les doublons
+            user.stripe_subscription_id = subscription.id
+            user.subscription_status = subscription.status
+            user.save()
+            
+            logger.info(f"✅ Abonnement créé: {subscription.id}")
+            
+            return Response({
+                'subscription_id': subscription.id,
+                'client_secret': subscription.latest_invoice.payment_intent.client_secret,
+                'status': subscription.status,
+            })
+            
+    except stripe.error.StripeError as e:
+        logger.error(f"❌ Erreur Stripe: {e}")
+        return Response({
+            'error': 'Erreur lors de la création de l\'abonnement',
+            'details': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        logger.error(f"❌ Erreur inattendue: {e}")
+        return Response({
+            'error': 'Erreur serveur',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        # Libérer le verrou
+        create_subscription._locks[lock_key].release()
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_subscription(request):
+    """Annule l'abonnement de l'utilisateur"""
+    try:
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+        user = request.user
+        
+        if not user.stripe_subscription_id:
+            return Response({
+                'error': 'Aucun abonnement actif trouvé'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Annuler l'abonnement dans Stripe
+        subscription = stripe.Subscription.modify(
+            user.stripe_subscription_id,
+            cancel_at_period_end=True
+        )
+        
+        logger.info(f"✅ Abonnement programmé pour annulation: {user.stripe_subscription_id}")
+        
+        return Response({
+            'success': True,
+            'message': 'Votre abonnement sera annulé à la fin de la période courante.',
+            'cancel_at': datetime.fromtimestamp(subscription.current_period_end).isoformat()
+        })
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"❌ Erreur Stripe: {e}")
+        return Response({
+            'error': 'Erreur lors de l\'annulation de l\'abonnement',
+            'details': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        logger.error(f"❌ Erreur inattendue: {e}")
+        return Response({
+            'error': 'Erreur serveur',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
@@ -73,8 +275,16 @@ def update_profile(request):
     
     try:
         user.save()
-        serializer = UserSerializer(user)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response({
+            'id': user.id,
+            'email': user.email,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'is_premium': user.is_premium,
+            'education_level': user.education_level,
+            'date_joined': user.date_joined,
+        }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({'error': 'Erreur lors de la mise à jour du profil'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -139,7 +349,14 @@ def user_role_info(request):
         'quiz_count_today': quiz_count_today,
         'attempts_count_today': attempts_count_today,
         'limits': limits[role],
-        'user': UserSerializer(user).data if user else None
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'is_premium': user.is_premium,
+        } if user else None
     }
     
     # Ajouter les informations de session pour les invités
@@ -177,6 +394,25 @@ def upload_document(request):
     # Vérifier les limites selon le rôle utilisateur
     user = request.user if request.user.is_authenticated else None
     user_role = user.get_user_role() if user else 'guest'
+    
+    # Vérifier la taille du fichier selon le rôle utilisateur
+    file_size_mb = file.size / (1024 * 1024)  # Convertir en MB
+    
+    if user_role == 'guest' and file_size_mb > 2:
+        return Response({
+            'error': 'Fichier trop volumineux',
+            'details': f'Limite pour les invités : 2 MB. Taille actuelle : {file_size_mb:.1f} MB. Inscrivez-vous pour uploader des fichiers jusqu\'à 5 MB.'
+        }, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+    elif user_role == 'free' and file_size_mb > 5:
+        return Response({
+            'error': 'Fichier trop volumineux',
+            'details': f'Limite pour les comptes gratuits : 5 MB. Taille actuelle : {file_size_mb:.1f} MB. Passez à Premium pour uploader des fichiers jusqu\'à 50 MB.'
+        }, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+    elif user_role == 'premium' and file_size_mb > 50:
+        return Response({
+            'error': 'Fichier trop volumineux',
+            'details': f'Limite pour les comptes Premium : 50 MB. Taille actuelle : {file_size_mb:.1f} MB.'
+        }, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
     
     # Vérifications spécifiques pour les invités
     if user_role == 'guest':
@@ -875,7 +1111,408 @@ def get_lesson_attempts(request, lesson_id):
         lesson = Lesson.objects.get(id=lesson_id, user=request.user)
         attempts = LessonAttempt.objects.filter(lesson=lesson).order_by('attempt_number')
         
-        serializer = LessonAttemptSerializer(attempts, many=True)
         return Response(serializer.data)
     except Lesson.DoesNotExist:
         return Response({'error': 'Leçon non trouvée'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f"❌ Erreur lors de la récupération des tentatives: {e}")
+        return Response({'error': 'Erreur lors de la récupération des tentatives'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_lesson(request, lesson_id):
+    """Supprime une leçon et toutes ses données associées en cascade"""
+    try:
+        # Vérifier que la leçon appartient à l'utilisateur
+        lesson = Lesson.objects.get(id=lesson_id, user=request.user)
+        
+        # Supprimer en cascade : UserAnswer -> Question -> Document -> Lesson
+        # 1. Supprimer toutes les réponses utilisateur associées à cette leçon
+        UserAnswer.objects.filter(lesson=lesson).delete()
+        
+        # 2. Supprimer toutes les tentatives de leçon
+        LessonAttempt.objects.filter(lesson=lesson).delete()
+        
+        # 3. Récupérer le document associé avant de supprimer les questions
+        document = lesson.document
+        
+        # 4. Supprimer toutes les questions associées au document
+        Question.objects.filter(document=document).delete()
+        
+        # 5. Supprimer le document (fichier physique)
+        if document.file:
+            try:
+                if os.path.isfile(document.file.path):
+                    os.remove(document.file.path)
+            except Exception as e:
+                logger.warning(f"⚠️ Impossible de supprimer le fichier physique: {e}")
+        
+        # 6. Supprimer le document de la base de données
+        document.delete()
+        
+        # 7. Supprimer la leçon
+        lesson.delete()
+        
+        logger.info(f"✅ Leçon {lesson_id} supprimée avec succès par l'utilisateur {request.user.id}")
+        
+        return Response({
+            'message': 'Leçon supprimée avec succès',
+            'lesson_id': lesson_id
+        }, status=status.HTTP_200_OK)
+        
+    except Lesson.DoesNotExist:
+        return Response({'error': 'Leçon non trouvée'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f"❌ Erreur lors de la suppression de la leçon {lesson_id}: {e}")
+        return Response({
+            'error': 'Erreur lors de la suppression de la leçon',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_payment_intent(request):
+    """Crée un PaymentIntent Stripe pour le checkout"""
+    try:
+        # Configuration Stripe dans la vue
+        stripe_secret_key = settings.STRIPE_SECRET_KEY
+        
+        # Vérifier que la clé Stripe est bien définie
+        if not stripe_secret_key:
+            logger.error("❌ STRIPE_SECRET_KEY non définie dans les settings")
+            return Response({
+                'error': 'Configuration Stripe manquante',
+                'details': 'Clé secrète Stripe non configurée'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        stripe.api_key = stripe_secret_key
+        
+        logger.info(f"🔑 Création PaymentIntent pour utilisateur: {request.user.id}")
+        logger.info(f"🔑 Clé Stripe configurée: {stripe_secret_key[:20]}...")
+        
+        # Prix en centimes (exemple: 9.99€ = 999 centimes)
+        amount = request.data.get('amount', 999)  # Prix par défaut: 9.99€
+        logger.info(f"💰 Montant demandé: {amount} centimes")
+        
+        # Vérifier que l'utilisateur est bien authentifié
+        if not request.user.is_authenticated:
+            logger.error("❌ Utilisateur non authentifié")
+            return Response({
+                'error': 'Utilisateur non authentifié'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Créer le PaymentIntent
+        logger.info("🔄 Création du PaymentIntent Stripe...")
+        intent = stripe.PaymentIntent.create(
+            amount=amount,
+            currency='eur',
+            metadata={
+                'user_id': request.user.id,
+                'user_email': request.user.email,
+            }
+        )
+        
+        logger.info(f"✅ PaymentIntent créé: {intent.id}")
+        
+        # Enregistrer le paiement dans la base de données
+        payment, created = StripePayment.objects.get_or_create(
+            payment_intent_id=intent.id,
+            defaults={
+                'user': request.user,
+                'amount': amount,
+                'currency': 'eur',
+                'status': intent.status,
+                'metadata': {
+                    'user_id': request.user.id,
+                    'user_email': request.user.email,
+                }
+            }
+        )
+        
+        if not created:
+            # Mettre à jour le statut si le paiement existe déjà
+            payment.status = intent.status
+            payment.save()
+        
+        logger.info(f"💾 Paiement enregistré en base: {payment.id}")
+        
+        return Response({
+            'client_secret': intent.client_secret,
+            'amount': amount
+        })
+        
+    except stripe.error.StripeError as e:
+        logger.error(f"❌ Erreur Stripe: {e}")
+        return Response({
+            'error': 'Erreur lors de la création du paiement',
+            'details': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        logger.error(f"❌ Erreur inattendue: {e}")
+        logger.error(f"❌ Type d'erreur: {type(e)}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        return Response({
+            'error': 'Erreur serveur',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def confirm_payment(request):
+    """Confirme le paiement et met à jour le statut utilisateur"""
+    try:
+        # Configuration Stripe dans la vue
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+        
+        payment_intent_id = request.data.get('payment_intent_id')
+        
+        if not payment_intent_id:
+            return Response({
+                'error': 'Payment Intent ID requis'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Récupérer le PaymentIntent depuis Stripe
+        intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+        
+        # Mettre à jour le statut du paiement en base
+        try:
+            payment = StripePayment.objects.get(payment_intent_id=payment_intent_id)
+            payment.status = intent.status
+            payment.save()
+            logger.info(f"💾 Statut du paiement mis à jour: {payment_intent_id} -> {intent.status}")
+        except StripePayment.DoesNotExist:
+            logger.warning(f"⚠️ Paiement {payment_intent_id} non trouvé en base")
+        
+        # Vérifier que le paiement est réussi
+        if intent.status == 'succeeded':
+            # Mettre à jour l'utilisateur en Premium avec abonnement
+            user = request.user
+            user.is_premium = True
+            
+            # Définir la date d'expiration selon le montant payé
+            from django.utils import timezone
+            amount = intent.amount
+            
+            if amount >= 9999:  # 99.99€ = abonnement annuel
+                user.extend_subscription(days=365)
+                subscription_type = "annuel"
+            else:  # 9.99€ = abonnement mensuel
+                user.extend_subscription(days=30)
+                subscription_type = "mensuel"
+            
+            logger.info(f"✅ Utilisateur {user.id} mis à jour en Premium ({subscription_type}) après paiement {payment_intent_id}")
+            
+            return Response({
+                'success': True,
+                'message': f'Paiement confirmé avec succès ! Votre abonnement {subscription_type} est maintenant actif.',
+                'user': {
+                    'id': user.id,
+                    'email': user.email,
+                    'username': user.username,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'is_premium': user.is_premium,
+                },
+                'subscription_type': subscription_type,
+                'expires_at': user.current_period_end.isoformat() if user.current_period_end else None
+            })
+        else:
+            return Response({
+                'error': 'Paiement non confirmé',
+                'status': intent.status
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+    except stripe.error.StripeError as e:
+        logger.error(f"Erreur Stripe lors de la confirmation: {e}")
+        return Response({
+            'error': 'Erreur lors de la confirmation du paiement',
+            'details': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        logger.error(f"Erreur inattendue lors de la confirmation: {e}")
+        return Response({
+            'error': 'Erreur serveur',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@csrf_exempt
+def stripe_webhook(request):
+    """Webhook Stripe pour gérer les événements de paiement"""
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    
+    # Configuration Stripe dans la vue
+    stripe.api_key = settings.STRIPE_SECRET_KEY
+    
+    payload = request.body
+    sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
+    
+    try:
+        print(f"🔑 Clé webhook utilisée: {settings.STRIPE_WEBHOOK_SECRET}")
+        print(f"🔑 Signature reçue: {sig_header}")
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        logger.error("Payload invalide")
+        return HttpResponse(status=400)
+    except stripe.error.SignatureVerificationError:
+        logger.error("Signature invalide")
+        return HttpResponse(status=400)
+    
+    # Gérer les événements
+    logger.info(f"🔔 Webhook reçu: {event['type']}")
+    
+    if event['type'] == 'customer.subscription.created':
+        subscription = event['data']['object']
+        customer_id = subscription['customer']
+        
+        try:
+            user = User.objects.get(stripe_customer_id=customer_id)
+            user.stripe_subscription_id = subscription['id']
+            user.subscription_status = subscription['status']
+            if 'current_period_end' in subscription:
+                user.current_period_end = datetime.fromtimestamp(subscription['current_period_end'])
+            user.is_premium = subscription['status'] in ['active', 'trialing']
+            
+            # Déterminer l'intervalle
+            if subscription['items']['data']:
+                interval = subscription['items']['data'][0]['price']['recurring']['interval']
+                user.subscription_interval = interval
+            
+            user.save()
+            logger.info(f"✅ Abonnement créé pour utilisateur {user.id}: {subscription['id']}")
+        except User.DoesNotExist:
+            logger.error(f"Utilisateur avec customer_id {customer_id} non trouvé")
+    
+    elif event['type'] == 'customer.subscription.updated':
+        subscription = event['data']['object']
+        subscription_id = subscription['id']
+        
+        print(f"🔄 Traitement subscription.updated: {subscription_id}")
+        print(f"📊 Statut reçu: {subscription['status']}")
+        print(f"📅 current_period_end: {subscription.get('current_period_end', 'N/A')}")
+        
+        try:
+            user = User.objects.get(stripe_subscription_id=subscription_id)
+            print(f"👤 Utilisateur trouvé: {user.email} (ID: {user.id})")
+            
+            # Récupérer les infos complètes depuis Stripe
+            stripe.api_key = settings.STRIPE_SECRET_KEY
+            full_subscription = stripe.Subscription.retrieve(subscription_id)
+            
+            user.subscription_status = full_subscription['status']
+            
+            # Capturer les informations d'annulation
+            user.cancel_at_period_end = full_subscription.get('cancel_at_period_end', False)
+            if full_subscription.get('canceled_at'):
+                from django.utils import timezone
+                user.canceled_at = timezone.make_aware(datetime.fromtimestamp(full_subscription['canceled_at']))
+                print(f"📅 Date d'annulation: {user.canceled_at}")
+            
+            # Toujours mettre à jour current_period_end depuis Stripe
+            if 'current_period_end' in full_subscription:
+                from django.utils import timezone
+                user.current_period_end = timezone.make_aware(datetime.fromtimestamp(full_subscription['current_period_end']))
+                print(f"📅 Date de fin mise à jour: {user.current_period_end}")
+            
+            print(f"🚫 Annulation programmée: {user.cancel_at_period_end}")
+            
+            # Logique améliorée : rester Premium jusqu'à la fin de la période
+            from django.utils import timezone
+            now = timezone.now()
+            
+            if subscription['status'] == 'canceled':
+                # Si annulé mais pas encore expiré, rester Premium
+                if user.current_period_end and user.current_period_end > now:
+                    user.is_premium = True
+                    print(f"✅ Annulé mais Premium maintenu jusqu'au {user.current_period_end}")
+                else:
+                    user.is_premium = False
+                    print(f"❌ Annulé et Premium retiré")
+            else:
+                # Pour les autres statuts, utiliser la logique normale
+                user.is_premium = subscription['status'] in ['active', 'trialing']
+                print(f"🔄 Statut normal: Premium = {user.is_premium}")
+            
+            user.save()
+            print(f"💾 Utilisateur sauvegardé: Premium={user.is_premium}, Status={user.subscription_status}, CancelAtPeriodEnd={user.cancel_at_period_end}")
+            logger.info(f"✅ Abonnement mis à jour pour utilisateur {user.id}: {subscription['status']}")
+        except User.DoesNotExist:
+            print(f"❌ Utilisateur avec subscription_id {subscription_id} non trouvé")
+            logger.error(f"Utilisateur avec subscription_id {subscription_id} non trouvé")
+    
+    elif event['type'] == 'customer.subscription.deleted':
+        subscription = event['data']['object']
+        subscription_id = subscription['id']
+        
+        print(f"🗑️ Traitement subscription.deleted: {subscription_id}")
+        
+        try:
+            user = User.objects.get(stripe_subscription_id=subscription_id)
+            print(f"👤 Utilisateur trouvé: {user.email} (ID: {user.id})")
+            
+            # Nettoyer tous les champs d'abonnement
+            user.subscription_status = 'canceled'
+            user.is_premium = False
+            user.stripe_subscription_id = ''  # Nettoyer l'ID d'abonnement
+            user.current_period_end = None    # Nettoyer la date de fin
+            user.subscription_interval = ''   # Nettoyer l'intervalle
+            user.cancel_at_period_end = False # Nettoyer le flag d'annulation
+            # Garder canceled_at pour l'historique
+            
+            user.save()
+            
+            print(f"❌ Abonnement définitivement supprimé pour utilisateur {user.id}")
+            print(f"🧹 Champs d'abonnement nettoyés")
+            print(f"💾 Utilisateur sauvegardé: Premium={user.is_premium}, Status={user.subscription_status}")
+            logger.info(f"✅ Abonnement annulé pour utilisateur {user.id}")
+        except User.DoesNotExist:
+            print(f"❌ Utilisateur avec subscription_id {subscription_id} non trouvé")
+            logger.error(f"Utilisateur avec subscription_id {subscription_id} non trouvé")
+    
+    elif event['type'] == 'invoice.payment_succeeded':
+        invoice = event['data']['object']
+        subscription_id = invoice.get('subscription')
+        
+        if subscription_id:
+            try:
+                user = User.objects.get(stripe_subscription_id=subscription_id)
+                user.subscription_status = 'active'
+                user.is_premium = True
+                user.save()
+                logger.info(f"✅ Paiement réussi pour utilisateur {user.id}")
+            except User.DoesNotExist:
+                logger.error(f"Utilisateur avec subscription_id {subscription_id} non trouvé")
+    
+    elif event['type'] == 'invoice.payment_failed':
+        invoice = event['data']['object']
+        subscription_id = invoice.get('subscription')
+        
+        if subscription_id:
+            try:
+                user = User.objects.get(stripe_subscription_id=subscription_id)
+                user.subscription_status = 'past_due'
+                user.is_premium = False
+                user.save()
+                logger.info(f"⚠️ Paiement échoué pour utilisateur {user.id}")
+            except User.DoesNotExist:
+                logger.error(f"Utilisateur avec subscription_id {subscription_id} non trouvé")
+    
+    elif event['type'] == 'payment_intent.succeeded':
+        # Garder l'ancien code pour les paiements ponctuels
+        payment_intent = event['data']['object']
+        user_id = payment_intent['metadata'].get('user_id')
+        
+        if user_id:
+            try:
+                user = User.objects.get(id=user_id)
+                user.is_premium = True
+                user.save()
+                logger.info(f"✅ Utilisateur {user_id} mis à jour en Premium via webhook")
+            except User.DoesNotExist:
+                logger.error(f"Utilisateur {user_id} non trouvé")
+    
+    return HttpResponse(status=200)
+

@@ -10,3 +10,4 @@ setuptools
 psycopg[binary]
 gunicorn
 whitenoise
+stripe
