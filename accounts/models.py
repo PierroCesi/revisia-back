@@ -16,7 +16,7 @@ class User(AbstractUser):
     last_attempt_date = models.DateField(null=True, blank=True, help_text="Date de la dernière tentative")
     
     # Champs Stripe Subscriptions
-    stripe_customer_id = models.CharField(max_length=255, blank=True, unique=True, null=True, help_text="ID du customer Stripe")
+    stripe_customer_id = models.CharField(max_length=255, blank=True, null=True, help_text="ID du customer Stripe")
     stripe_subscription_id = models.CharField(max_length=255, blank=True, help_text="ID de l'abonnement Stripe")
     subscription_status = models.CharField(max_length=50, default='inactive', help_text="Statut de l'abonnement Stripe")
     current_period_end = models.DateTimeField(null=True, blank=True, help_text="Fin de la période courante de l'abonnement")
