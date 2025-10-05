@@ -1170,6 +1170,56 @@ def delete_lesson(request, lesson_id):
             'details': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_lesson(request, lesson_id):
+    """Met à jour le titre d'une leçon"""
+    try:
+        # Vérifier que la leçon appartient à l'utilisateur
+        lesson = Lesson.objects.get(id=lesson_id, user=request.user)
+        
+        # Récupérer le nouveau titre depuis la requête
+        new_title = request.data.get('title')
+        
+        if not new_title:
+            return Response({
+                'error': 'Le titre est requis'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Valider la longueur du titre
+        if len(new_title.strip()) == 0:
+            return Response({
+                'error': 'Le titre ne peut pas être vide'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if len(new_title) > 255:
+            return Response({
+                'error': 'Le titre ne peut pas dépasser 255 caractères'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Mettre à jour le titre
+        lesson.title = new_title.strip()
+        lesson.save()
+        
+        logger.info(f"✅ Titre de la leçon {lesson_id} mis à jour par l'utilisateur {request.user.id}: '{new_title}'")
+        
+        # Sérialiser la leçon mise à jour
+        serializer = LessonSerializer(lesson)
+        
+        return Response({
+            'message': 'Titre de la leçon mis à jour avec succès',
+            'lesson': serializer.data
+        }, status=status.HTTP_200_OK)
+        
+    except Lesson.DoesNotExist:
+        return Response({'error': 'Leçon non trouvée'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f"❌ Erreur lors de la mise à jour de la leçon {lesson_id}: {e}")
+        return Response({
+            'error': 'Erreur lors de la mise à jour de la leçon',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_payment_intent(request):
@@ -1516,4 +1566,90 @@ def stripe_webhook(request):
                 logger.error(f"Utilisateur {user_id} non trouvé")
     
     return HttpResponse(status=200)
+
+@api_view(['DELETE'])
+@permission_classes([AllowAny])
+def delete_question(request, lesson_id, question_id):
+    """Supprime une question d'une leçon"""
+    try:
+        # Récupérer la leçon
+        lesson = Lesson.objects.get(id=lesson_id)
+        
+        # Vérifier les permissions
+        user = request.user if request.user.is_authenticated else None
+        guest_session = None
+        
+        if user:
+            # Utilisateur connecté - vérifier qu'il est propriétaire de la leçon
+            if lesson.user != user:
+                return Response({'error': 'Accès refusé'}, status=status.HTTP_403_FORBIDDEN)
+        else:
+            # Invité - vérifier la session
+            session_id = request.GET.get('session_id')
+            if not session_id:
+                return Response({'error': 'Session invité requise'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            from .guest_utils import get_or_create_guest_session
+            guest_session = get_or_create_guest_session(request, session_id)
+            
+            if lesson.guest_session != guest_session:
+                return Response({'error': 'Accès refusé'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Récupérer la question
+        question = Question.objects.get(id=question_id, lesson=lesson)
+        
+        # Supprimer toutes les réponses utilisateur liées à cette question
+        if user:
+            UserAnswer.objects.filter(user=user, question=question).delete()
+        else:
+            UserAnswer.objects.filter(guest_session=guest_session, question=question).delete()
+        
+        # Supprimer la question (cela supprimera aussi les réponses via CASCADE)
+        question.delete()
+        
+        # Recalculer les statistiques de la leçon
+        if user:
+            answered_questions = UserAnswer.objects.filter(user=user, lesson=lesson).values('question').distinct()
+            correct_answers = UserAnswer.objects.filter(user=user, lesson=lesson, is_correct=True).values('question').distinct().count()
+        else:
+            answered_questions = UserAnswer.objects.filter(guest_session=guest_session, lesson=lesson).values('question').distinct()
+            correct_answers = UserAnswer.objects.filter(guest_session=guest_session, lesson=lesson, is_correct=True).values('question').distinct().count()
+        
+        # Mettre à jour le nombre total de questions
+        lesson.total_questions = Question.objects.filter(lesson=lesson).count()
+        lesson.completed_questions = answered_questions.count()
+        
+        # Recalculer le score
+        new_score = int((correct_answers / lesson.total_questions) * 100) if lesson.total_questions > 0 else 0
+        lesson.score = new_score
+        
+        # Si plus de questions, marquer comme terminé
+        if lesson.total_questions == 0:
+            lesson.status = 'termine'
+        elif answered_questions.count() >= lesson.total_questions:
+            lesson.status = 'termine'
+        else:
+            lesson.status = 'en_cours'
+        
+        lesson.save()
+        
+        response_data = {
+            'message': 'Question supprimée avec succès',
+            'lesson_progress': lesson.progress,
+            'lesson_score': lesson.score,
+            'total_questions': lesson.total_questions
+        }
+        
+        # Ajouter session_id pour les invités
+        if not request.user.is_authenticated:
+            response_data['session_id'] = guest_session.session_id
+        
+        return Response(response_data)
+        
+    except Lesson.DoesNotExist:
+        return Response({'error': 'Leçon non trouvée'}, status=status.HTTP_404_NOT_FOUND)
+    except Question.DoesNotExist:
+        return Response({'error': 'Question non trouvée'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

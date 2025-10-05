@@ -22,6 +22,8 @@ urlpatterns = [
     path('lessons/<int:lesson_id>/attempts/', views.get_lesson_attempts, name='get_lesson_attempts'),
     path('lessons/<int:lesson_id>/guest-results/', views.get_guest_quiz_results, name='get_guest_quiz_results'),
     path('lessons/<int:lesson_id>/delete/', views.delete_lesson, name='delete_lesson'),
+    path('lessons/<int:lesson_id>/update/', views.update_lesson, name='update_lesson'),
+    path('lessons/<int:lesson_id>/questions/<int:question_id>/delete/', views.delete_question, name='delete_question'),
     path('lessons/stats/', views.get_lesson_stats, name='get_lesson_stats'),
     path('transfer-guest-data/', views.transfer_guest_data, name='transfer_guest_data'),
     # Stripe endpoints
