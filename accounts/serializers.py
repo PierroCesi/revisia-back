@@ -86,9 +86,91 @@ class UserAnswerSerializer(serializers.ModelSerializer):
         )
 
 class LessonAttemptSerializer(serializers.ModelSerializer):
+    user_answers = serializers.SerializerMethodField()
+    
     class Meta:
         model = LessonAttempt
-        fields = ('attempt_number', 'score', 'completed_at')
+        fields = ('attempt_number', 'score', 'completed_at', 'user_answers')
+    
+    def get_user_answers(self, obj):
+        """Récupère les réponses de l'utilisateur pour cette tentative"""
+        # Récupérer toutes les questions de la leçon
+        questions = Question.objects.filter(document=obj.lesson.document).order_by('id')
+        
+        # Pour cette tentative, on récupère les réponses les plus récentes
+        # car le système actuel ne stocke pas attempt_number dans UserAnswer
+        # On utilise la date de création de la tentative comme référence
+        answers_data = []
+        
+        for question in questions:
+            # Récupérer la réponse de l'utilisateur pour cette leçon
+            # On prend la réponse la plus récente pour cette question
+            try:
+                user_answer = UserAnswer.objects.filter(
+                    question=question,
+                    lesson=obj.lesson
+                ).order_by('-answered_at').first()
+                
+                if user_answer:
+                    # Récupérer toutes les réponses possibles pour cette question
+                    all_answers = Answer.objects.filter(question=question).order_by('id')
+                    
+                    answers_data.append({
+                        'question_id': question.id,
+                        'question_text': question.question_text,
+                        'difficulty': question.difficulty,
+                        'user_answer_id': user_answer.selected_answer_id,
+                        'user_answer_text': user_answer.selected_answer.answer_text if user_answer.selected_answer else None,
+                        'is_correct': user_answer.is_correct,
+                        'all_answers': [
+                            {
+                                'id': answer.id,
+                                'text': answer.answer_text,
+                                'is_correct': answer.is_correct
+                            }
+                            for answer in all_answers
+                        ]
+                    })
+                else:
+                    # Si pas de réponse trouvée, marquer comme non répondu
+                    all_answers = Answer.objects.filter(question=question).order_by('id')
+                    answers_data.append({
+                        'question_id': question.id,
+                        'question_text': question.question_text,
+                        'difficulty': question.difficulty,
+                        'user_answer_id': None,
+                        'user_answer_text': None,
+                        'is_correct': False,
+                        'all_answers': [
+                            {
+                                'id': answer.id,
+                                'text': answer.answer_text,
+                                'is_correct': answer.is_correct
+                            }
+                            for answer in all_answers
+                        ]
+                    })
+            except Exception as e:
+                # En cas d'erreur, créer une entrée vide
+                all_answers = Answer.objects.filter(question=question).order_by('id')
+                answers_data.append({
+                    'question_id': question.id,
+                    'question_text': question.question_text,
+                    'difficulty': question.difficulty,
+                    'user_answer_id': None,
+                    'user_answer_text': None,
+                    'is_correct': False,
+                    'all_answers': [
+                        {
+                            'id': answer.id,
+                            'text': answer.answer_text,
+                            'is_correct': answer.is_correct
+                        }
+                        for answer in all_answers
+                    ]
+                })
+        
+        return answers_data
 
 class LessonStatsSerializer(serializers.Serializer):
     total_lessons = serializers.IntegerField()
