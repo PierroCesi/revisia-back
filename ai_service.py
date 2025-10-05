@@ -158,13 +158,20 @@ Réponds UNIQUEMENT avec le JSON, sans texte supplémentaire.
             logger.info(f"🤖 Envoi de la requête à OpenAI avec le modèle gpt-4o-mini")
             logger.info(f"📝 Contenu du message: {len(message_content)} éléments")
             
+            # Calculer max_tokens de manière très généreuse pour éviter les coupures
+            # Estimation large : 150 tokens par question + 1000 tokens de marge
+            estimated_tokens = (question_count * 150) + 1000
+            max_tokens = min(max(estimated_tokens, 2000), 8000)  # Entre 2000 et 8000 tokens
+            
+            logger.info(f"🎯 Max tokens généreux: {max_tokens} pour {question_count} questions (estimation: {estimated_tokens})")
+            
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Tu es un expert en pédagogie, didactique et évaluation. Tu génères des questions de quiz de haute qualité, adaptées au niveau d'éducation de l'utilisateur. Tu maîtrises les principes de la taxonomie de Bloom et adaptes le vocabulaire et la complexité selon le public cible."},
+                    {"role": "system", "content": "Tu es un expert en pédagogie, didactique et évaluation. Tu génères des questions de quiz de haute qualité, adaptées au niveau d'éducation de l'utilisateur. Tu maîtrises les principes de la taxonomie de Bloom et adaptes le vocabulaire et la complexité selon le public cible. IMPORTANT: Tu dois toujours retourner un JSON valide et complet, même si tu dois réduire le nombre de questions pour respecter les limites de tokens."},
                     {"role": "user", "content": message_content}
                 ],
-                max_tokens=2500,
+                max_tokens=max_tokens,
                 temperature=0.6
             )
             
@@ -179,11 +186,56 @@ Réponds UNIQUEMENT avec le JSON, sans texte supplémentaire.
                 content = content[7:]
             if content.endswith('```'):
                 content = content[:-3]
+            if content.startswith('```'):
+                content = content[3:]
+            
+            # Nettoyer les espaces et caractères indésirables
+            content = content.strip()
             
             logger.info(f"🧹 Contenu nettoyé: {content[:200]}...")
             
-            # Parser le JSON
-            questions_data = json.loads(content)
+            # Vérifier si le JSON semble complet
+            if not content.endswith('}'):
+                logger.warning("⚠️ Le JSON semble incomplet (ne se termine pas par '}')")
+                # Essayer de compléter le JSON
+                if content.count('{') > content.count('}'):
+                    missing_braces = content.count('{') - content.count('}')
+                    content += '}' * missing_braces
+                    logger.info(f"🔧 Ajout de {missing_braces} accolades fermantes")
+            
+            # Parser le JSON avec gestion d'erreur améliorée
+            try:
+                questions_data = json.loads(content)
+            except json.JSONDecodeError as json_error:
+                logger.error(f"❌ Erreur de parsing JSON: {json_error}")
+                logger.error(f"📍 Position de l'erreur: ligne {json_error.lineno}, colonne {json_error.colno}")
+                logger.error(f"📄 Contenu autour de l'erreur: {content[max(0, json_error.pos-50):json_error.pos+50]}")
+                
+                # Essayer de réparer le JSON
+                try:
+                    # Supprimer les caractères problématiques
+                    import re
+                    # Remplacer les guillemets simples par des guillemets doubles
+                    content = re.sub(r"'([^']*)':", r'"\1":', content)
+                    # Remplacer les guillemets simples dans les valeurs
+                    content = re.sub(r':\s*\'([^\']*)\'', r': "\1"', content)
+                    
+                    logger.info("🔧 Tentative de réparation du JSON...")
+                    questions_data = json.loads(content)
+                    logger.info("✅ JSON réparé avec succès!")
+                except:
+                    logger.error("❌ Impossible de réparer le JSON")
+                    raise Exception(f"Erreur de parsing JSON de la réponse IA: {json_error}")
+            
+            # Vérifier la structure du JSON
+            if 'questions' not in questions_data:
+                logger.error("❌ Structure JSON invalide: clé 'questions' manquante")
+                raise Exception("Structure JSON invalide: clé 'questions' manquante")
+            
+            if not isinstance(questions_data['questions'], list):
+                logger.error("❌ Structure JSON invalide: 'questions' n'est pas une liste")
+                raise Exception("Structure JSON invalide: 'questions' n'est pas une liste")
+            
             logger.info(f"✅ JSON parsé avec succès, {len(questions_data['questions'])} questions générées")
             
             # Nettoyer le fichier uploadé
@@ -194,11 +246,6 @@ Réponds UNIQUEMENT avec le JSON, sans texte supplémentaire.
                 logger.warning(f"⚠️ Impossible de supprimer le fichier temporaire: {cleanup_error}")
             
             return questions_data['questions']
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Erreur de parsing JSON: {e}")
-            logger.error(f"Contenu reçu: {content}")
-            raise Exception(f"Erreur de parsing JSON de la réponse IA: {e}")
             
         except openai.AuthenticationError as e:
             logger.error(f"❌ Erreur d'authentification OpenAI: {e}")
