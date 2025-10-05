@@ -1111,6 +1111,7 @@ def get_lesson_attempts(request, lesson_id):
         lesson = Lesson.objects.get(id=lesson_id, user=request.user)
         attempts = LessonAttempt.objects.filter(lesson=lesson).order_by('attempt_number')
         
+        serializer = LessonAttemptSerializer(attempts, many=True)
         return Response(serializer.data)
     except Lesson.DoesNotExist:
         return Response({'error': 'Leçon non trouvée'}, status=status.HTTP_404_NOT_FOUND)

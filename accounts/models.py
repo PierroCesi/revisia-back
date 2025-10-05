@@ -32,8 +32,16 @@ class User(AbstractUser):
     
     def get_user_role(self):
         """Retourne le rôle de l'utilisateur"""
-        if self.is_premium and self.is_subscription_active():
-            return 'premium'
+        if self.is_premium:
+            # Si l'utilisateur est premium ET a un abonnement Stripe actif
+            if self.stripe_subscription_id and self.is_subscription_active():
+                return 'premium'
+            # Si l'utilisateur est premium mais sans abonnement Stripe (premium manuel)
+            elif not self.stripe_subscription_id:
+                return 'premium'
+            # Si l'utilisateur est premium mais l'abonnement Stripe n'est pas actif
+            else:
+                return 'premium'  # Garder premium même si l'abonnement Stripe est inactif
         elif self.is_authenticated:
             return 'free'
         else:
